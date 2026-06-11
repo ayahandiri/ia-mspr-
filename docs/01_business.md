@@ -52,10 +52,10 @@ détecter les zones fragiles), et (4) correspond au **type d'approche illustré 
 
 | Critère | Choix | Justification |
 |---|---|---|
-| Famille | **Apprentissage non supervisé** | Pas de variable cible fiable ; on cherche une *structure* |
+| Famille | **Apprentissage non supervisé** (axe principal) | Pas de variable cible fiable ; on cherche une *structure* |
 | Tâche | **Partitionnement (clustering)** | Regrouper des services similaires en familles homogènes |
 | Algorithmes pressentis (étape 4, M2/M3) | KMeans, clustering hiérarchique | Standards, interprétables, adaptés à des features numériques |
-| Pourquoi pas la régression/classification | Cf. §2 | Cible absente ou circulaire |
+| Classification supervisée | **Livrable complémentaire encadré, cf. §8** | Cible *synthétique* assumée + garde-fous anti-circularité (exclusion `distance_km`/`vitesse_kmh`) |
 
 ## 4. Spécifications fonctionnelles du modèle
 
@@ -111,3 +111,64 @@ détecter les zones fragiles), et (4) correspond au **type d'approche illustré 
 2. **Étape 2 — Analyse** : `notebooks/01_eda.ipynb` + tableau des variables retenues.
 3. **Étape 3 — Préparation** : `notebooks/02_preparation.ipynb` + dataset de features
    documenté, prêt pour le clustering.
+4. **Étape 3b — Cible supervisée** : `notebooks/02b_cible_substitution.ipynb` qui ajoute
+   la cible `classe_substitution` et le découpage `split_classif` au dataset de features
+   (cf. §8).
+
+## 8. Cible supervisée encadrée (livrable de classification M2/M3)
+
+Le clustering (§2 à §4) **reste l'axe d'analyse principal et le plus honnête** au regard
+des données. Toutefois, le livrable impose **une tâche supervisée** (M2/M3 doivent
+entraîner régression logistique, RandomForest, XGBoost, LightGBM). Nous construisons donc,
+**en complément**, une cible de classification, en assumant explicitement ses limites et en
+neutralisant la circularité dénoncée au §2.
+
+### 8.1 Définition de la cible `classe_substitution`
+
+Cible **synthétique** (créée par règle, non observée) à 3 classes, fondée sur la distance,
+proxy de la **compétitivité de l'aérien** sur le corridor :
+
+| Classe | Règle | Effectif | Justification métier du seuil |
+|---|---|---|---|
+| `non_pertinent` | distance < **300 km** | 20 835 | En deçà, l'aérien intérieur n'a quasi pas d'offre (le temps d'accès aéroportuaire annule le gain) ; le train est déjà dominant → la substitution n'est pas un enjeu. |
+| `substitution_difficile` | 300 ≤ distance < **500 km** | 2 228 | Zone de bascule : selon que le service est un TGV ou un TER, l'avion peut ou non rester compétitif → cas intermédiaire incertain. |
+| `substitution_possible` | distance ≥ **500 km** | 624 | Corridors où le court-courrier intérieur est traditionnellement présent et où le report modal est l'enjeu central : **règle empirique des ~3 h de trajet** ferroviaire au-delà desquelles l'avion regagne des parts, **loi française 2023** interdisant les vols intérieurs doublés d'un train < 2 h 30, objectifs du **Green Deal**. |
+
+Le seuil de **500 km** est volontairement conservateur : il isole une classe « substitution
+possible » crédible plutôt que de gonfler artificiellement les effectifs. Une **cible binaire**
+(`substitution_possible` vs reste) se dérive trivialement de cette colonne si M2 le souhaite.
+
+### 8.2 Limites assumées (transparence pour le jury)
+
+- **Cible synthétique** : aucune substitution n'est *observée*, elle est *fabriquée* par seuil.
+- **Aucune donnée avion** : la distance n'est qu'un proxy de « un vol concurrent pourrait
+  exister », pas une mesure de substitution réelle.
+- **Périmètre réduit** : `distance_km` étant manquante à 54,7 %, seuls **23 687 services
+  (45,3 %)** sont étiquetables ; les autres restent `NaN` et hors apprentissage supervisé.
+- **Déséquilibre fort** : la classe `substitution_possible` ne pèse que **2,6 %** du périmètre
+  étiqueté.
+
+### 8.3 Garde-fous anti-circularité (point méthodologique clé)
+
+Pour ne pas retomber dans la circularité du §2 (« re-prédire une règle de seuil fabriquée à la
+main »), les variables explicatives **excluent** :
+
+- **`distance_km`** : c'est la source de la cible (fuite directe).
+- **`vitesse_kmh`** : elle vaut exactement `distance_km / duree_minutes × 60` (corrélation
+  **1.0**, écart médian nul) ; la conserver permettrait de recomposer la distance.
+
+Les features conservées sont donc des **caractéristiques d'exploitation** : `duree_minutes`,
+`emission_co2_kg`, `heure_decimale`, `is_nuit`, `is_transfrontalier`, `code_pays_dep`,
+`code_pays_arr`. `duree_minutes` et `emission_co2_kg` sont *corrélées* à la distance (≈ 0.89)
+mais **non déterministes** : c'est le signal légitime du modèle, pas une fuite. La question
+devient *« peut-on retrouver la bande de distance d'un service à partir de son profil
+d'exploitation ? »* — supervisée et non circulaire.
+
+### 8.4 Découpage et évaluation
+
+- **`split_classif`** : découpage **70 / 15 / 15 stratifié** sur la cible (la colonne `split`
+  du clustering n'est pas modifiée), garantissant que les 3 classes sont présentes dans
+  train (437 « possibles »), val (94) et test (93).
+- **Recommandation d'évaluation pour M2** : vu le déséquilibre, privilégier `class_weight=
+  'balanced'` (LogReg, RF) / `scale_pos_weight` (XGBoost, LightGBM) et juger en **macro-F1,
+  rappel par classe et matrice de confusion**, pas en accuracy globale.
